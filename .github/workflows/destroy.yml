@@ -1,0 +1,61 @@
+name: "Infrastructure Cleanup"
+
+on:
+  workflow_dispatch:
+
+env:
+  TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
+  TF_VAR_image_tag: "destroying"
+
+jobs:
+  terraform-destroy:
+    name: "Controlled Infrastructure Teardown"
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Destroy Plan
+        run: terraform plan -destroy -input=false -out=destroy.tfplan
+
+      - name: Slack Notification - Teardown Started
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.CI_SLACK_WEBHOOK_URL }}
+          SLACK_COLOR: '#FF9900'
+          SLACK_TITLE: "⚠️ Infrastructure Teardown Started"
+          SLACK_MESSAGE: "Terraform destroy has been approved for the production environment."
+
+      - name: Terraform Destroy Apply
+        run: terraform apply -auto-approve destroy.tfplan
+
+      - name: Slack Notification - Destruction Complete
+        if: success()
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.CI_SLACK_WEBHOOK_URL }}
+          SLACK_COLOR: '#FF9900'
+          SLACK_TITLE: "⚠️ Infrastructure Destroyed"
+          SLACK_MESSAGE: |
+            Environment: production
+            Action: Terraform Destroy
+            Triggered By: ${{ github.actor }}
+            Result: Terraform reported a successful teardown.
+
+      - name: Slack Notification - Destruction Failed
+        if: failure()
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.CI_SLACK_WEBHOOK_URL }}
+          SLACK_COLOR: 'danger'
+          SLACK_TITLE: "🚨 Destroy Failed"
+          SLACK_MESSAGE: |
+            Terraform was unable to fully destroy the resources.
+            Check the GitHub Actions run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}

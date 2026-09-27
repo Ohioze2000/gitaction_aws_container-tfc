@@ -1,0 +1,10 @@
+# Terraform local state and backups
+*.tfstate
+*.tfstate.backup
+.terraform/
+
+# Variables (Where your secrets live)
+*.tfvars
+# Python cache
+__pycache__/
+*.py[cod]

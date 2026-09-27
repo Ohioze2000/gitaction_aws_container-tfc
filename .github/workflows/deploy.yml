@@ -1,0 +1,108 @@
+name: "CI/CD Deployment"
+
+on:
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: dev-app-repo
+  TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
+  TF_VAR_image_tag: ${{ github.sha }}
+
+jobs:
+  # ECR must exist before the first application image can be pushed.
+  # This is a deliberately narrow Terraform bootstrap; the complete stack
+  # is reconciled in the final deployment job after the image exists.
+  bootstrap-ecr:
+    name: "1. Bootstrap ECR"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Plan - ECR Bootstrap
+        run: terraform plan -input=false -target=module.my-ecr
+
+      - name: Terraform Apply - ECR Bootstrap
+        run: terraform apply -auto-approve -input=false -target=module.my-ecr
+
+  build-and-push:
+    name: "2. Build & Push Image"
+    needs: bootstrap-ecr
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & Push Immutable Image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build --platform linux/amd64 -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" ./app
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+  deploy:
+    name: "3. Provision & Deploy"
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Plan
+        run: terraform plan -input=false -var="image_tag=${{ github.sha }}"
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve -input=false -var="image_tag=${{ github.sha }}"
+
+      - name: Capture Website URL
+        id: website
+        run: echo "url=$(terraform output -raw website_url)" >> "$GITHUB_OUTPUT"
+
+      # CI/CD notifications use the GitHub Actions secret independently from
+      # the runtime alert webhook, which is supplied to Terraform from HCP Terraform.
+      - name: Slack Notification - Deployment Success
+        if: success()
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.CI_SLACK_WEBHOOK_URL }}
+          SLACK_COLOR: 'good'
+          SLACK_TITLE: "✅ Deployment Successful"
+          SLACK_MESSAGE: |
+            Commit: ${{ github.sha }}
+            Environment: production
+            Website: ${{ steps.website.outputs.url }}
+
+      - name: Slack Notification - Deployment Failure
+        if: failure()
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.CI_SLACK_WEBHOOK_URL }}
+          SLACK_COLOR: 'danger'
+          SLACK_TITLE: "❌ Deployment Failed"
+          SLACK_MESSAGE: |
+            Commit: ${{ github.sha }}
+            Check GitHub Actions run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
